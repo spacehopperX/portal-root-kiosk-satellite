@@ -22,14 +22,38 @@ adb -s $SER pull /data/local/tmp/dolby_diag.txt
 
 **Inside the privileged window** — covers the protected [3]–[6] sections
 (protected `.so` libraries, EDID nodes, MobileConfig cache). Uses the
-optional `GHOSTLOCK_DIAG_SCRIPT` exec hook in `exploit/src/main.c`:
+optional `GHOSTLOCK_DIAG_SCRIPT` exec hook in `exploit/src/preload.c`.
+
+> **Placement matters.** The hook fires in the constructor, *after*
+> `run_exploit()` returns and only when `getuid()==0` (the same point that
+> logs `ROOT OK`). It is **not** placed at the top of `run_exploit()`: on
+> ripley, `run_exploit()` *is* the kernel exploit (slide → FOPS → configfs →
+> cred commit) and does not elevate on entry, so a top-of-`run_exploit` hook
+> would fire at uid 2000 and short-circuit the exploit before any kernel work.
+> The diagnostic therefore runs **only if the exploit actually completes and
+> reaches uid 0**. Watch for `ROOT OK` *before* the diagnostic banner; if it
+> is absent, the diagnostic ran unprivileged and the protected sections will
+> still read `Permission denied`.
 
 ```sh
+adb -s $SER push preload-portal-ripley-2041515800015050.so /data/local/tmp/preload-portal.so
 adb -s $SER push portal_dolby_diag.sh /data/local/tmp/
-adb -s $SER shell 'GHOSTLOCK_DIAG_SCRIPT=/data/local/tmp/portal_dolby_diag.sh \
-    LD_PRELOAD=<exploit.so> <trigger-binary>' > dolby_diag.txt 2>&1
+adb -s $SER shell 'env <ripley runtime vars> \
+    GHOSTLOCK_DIAG_SCRIPT=/data/local/tmp/portal_dolby_diag.sh \
+    LD_PRELOAD=/data/local/tmp/preload-portal.so /system/bin/true' > dolby_diag.txt 2>&1
 adb -s $SER pull /data/local/tmp/dolby_diag.txt
 ```
+
+See `run_dolby_diag.sh` for the full, verified ripley env-var set.
+
+## First privileged attempt (2026-11-25, 17:30)
+
+The first trigger used the top-of-`run_exploit` hook placement and the
+diagnostic ran at **uid 2000 / `shell`** (hook logged `uid=2000 euid=2000`,
+`rc=0`, no `ROOT OK`, no `slide`/`proc_uid` markers in logcat). It confirmed
+the unprivileged findings but did **not** reach the protected sections. The
+hook was moved to `preload.c` (post-elevation) and rebuilt; re-run to obtain
+the privileged [3]–[6] data.
 
 ## What the unprivileged run already established (2026-11-25)
 
@@ -69,7 +93,7 @@ Run as `shell` (uid 2000, SELinux enforcing) on
 
 The `ripley` target uses `CONFIGFS_ROOT_CRED_SID_ONLY` (SELinux stays
 enforcing globally; elevation reverts on process exit or reboot). The
-`main.c` change is an additive, env-gated hook that performs **no writes** and
-is inert unless `GHOSTLOCK_DIAG_SCRIPT` is set. Reboot the Portal afterward to
-fully clear any privileged state. No kiosk profile is applied; the exploit's
-kernel logic is untouched.
+`preload.c` change is an additive, env-gated hook that performs **no writes**
+and is inert unless `GHOSTLOCK_DIAG_SCRIPT` is set. Reboot the Portal
+afterward to fully clear any privileged state. No kiosk profile is applied;
+the exploit's kernel logic is untouched.
